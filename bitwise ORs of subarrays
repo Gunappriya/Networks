@@ -1,0 +1,68 @@
+#include <stdlib.h>
+#include <string.h>
+
+#define HASH_SIZE 262144
+
+typedef struct {
+    int key;
+    int used;
+} HashNode;
+
+HashNode ans[HASH_SIZE];
+HashNode prev[64];
+HashNode curr[64];
+
+int hash(int x) {
+    unsigned int h = (unsigned int)x;
+    return h % HASH_SIZE;
+}
+
+int insert(HashNode *table, int size, int key) {
+    int h = hash(key);
+    while (table[h].used) {
+        if (table[h].key == key)
+            return 0;
+        h = (h + 1) % size;
+    }
+    table[h].used = 1;
+    table[h].key = key;
+    return 1;
+}
+
+int subarrayBitwiseORs(int* arr, int arrSize) {
+    memset(ans, 0, sizeof(ans));
+
+    int prevVals[64], prevSize = 0;
+    int currVals[64], currSize;
+
+    int result = 0;
+
+    for (int i = 0; i < arrSize; i++) {
+        currSize = 0;
+        currVals[currSize++] = arr[i];
+
+        for (int j = 0; j < prevSize; j++) {
+            int val = prevVals[j] | arr[i];
+
+            int found = 0;
+            for (int k = 0; k < currSize; k++) {
+                if (currVals[k] == val) {
+                    found = 1;
+                    break;
+                }
+            }
+
+            if (!found)
+                currVals[currSize++] = val;
+        }
+
+        prevSize = currSize;
+        for (int j = 0; j < currSize; j++) {
+            prevVals[j] = currVals[j];
+            if (insert(ans, HASH_SIZE, currVals[j]))
+                result++;
+        }
+    }
+
+    return result;
+}
