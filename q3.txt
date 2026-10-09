@@ -1,0 +1,175 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 2048
+
+void log_activity(const char *message) {
+    FILE *log_file = fopen("server_log.txt", "a");
+    if (log_file) {
+        time_t now = time(NULL);
+        char *timestamp = ctime(&now);
+        timestamp[strlen(timestamp) - 1] = '\0'; // Remove newline
+        fprintf(log_file, "[%s] %s\n", timestamp, message);
+        fclose(log_file);
+    }
+}
+
+int main() {
+    int server_fd, new_socket;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
+    char buffer[BUFFER_SIZE];
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
+    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    listen(server_fd, 3);
+    printf("Multi-service Server running on port %d...\n", PORT);
+
+    while (1) {
+        new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
+        
+        // Step 1: Authentication (Hardcoded credentials admin/1234)
+        memset(buffer, 0, BUFFER_SIZE);
+        read(new_socket, buffer, BUFFER_SIZE);
+        char username[50], password[50];
+        sscanf(buffer, "%s %s", username, password);
+
+        if (strcmp(username, "admin") == 0 && strcmp(password, "1234") == 0) {
+            send(new_socket, "AUTH_SUCCESS", 12, 0);
+            log_activity("User 'admin' authenticated successfully.");
+        } else {
+            send(new_socket, "AUTH_FAIL", 9, 0);
+            log_activity("Failed authentication attempt.");
+            close(new_socket);
+            continue;
+        }
+
+        // Step 2: Handle client requests
+        while (1) {
+            memset(buffer, 0, BUFFER_SIZE);
+            int bytes_read = read(new_socket, buffer, BUFFER_SIZE);
+            if (bytes_read <= 0 || strcmp(buffer, "4") == 0) {
+                log_activity("Client session terminated.");
+                break;
+            }
+
+            if (strcmp(buffer, "1") == 0) { // Server Date/Time
+                time_t now = time(NULL);
+                char *dt = ctime(&now);
+                send(new_socket, dt, strlen(dt), 0);
+                log_activity("Served current date and time.");
+            } else if (strcmp(buffer, "2") == 0) { // Server System Info
+                char sys_info[] = "Server OS: Linux x86_64 | Uptime: OK";
+                send(new_socket, sys_info, strlen(sys_info), 0);
+                log_activity("Served system info.");
+            } else if (strncmp(buffer, "UPLOAD ", 7) == 0) { // File Upload
+                FILE *fp = fopen("uploaded_file.txt", "w");
+                if (fp) {
+                    fputs(buffer + 7, fp);
+                    fclose(fp);
+                    send(new_socket, "File uploaded successfully.", 27, 0);
+                    log_activity("File upload received and saved.");
+                } else {
+                    send(new_socket, "Error writing file.", 19, 0);
+                }
+            } else {
+                send(new_socket, "Invalid option.", 15, 0);
+                log_activity("Handled invalid client option.");
+            }
+        }
+        close(new_socket);
+    }
+    close(server_fd);
+    return 0;
+}
+----------------------------------------------------------------------------------------------------
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 2048
+
+int main() {
+    int sock = 0;
+    struct sockaddr_in serv_addr;
+    char buffer[BUFFER_SIZE] = {0};
+    char username[50], password[50];
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        printf("Connection Failed\n");
+        return -1;
+    }
+
+    printf("--- Login ---\nUsername: ");
+    scanf("%s", username);
+    printf("Password: ");
+    scanf("%s", password);
+
+    sprintf(buffer, "%s %s", username, password);
+    send(sock, buffer, strlen(buffer), 0);
+
+    memset(buffer, 0, BUFFER_SIZE);
+    read(sock, buffer, BUFFER_SIZE);
+
+    if (strcmp(buffer, "AUTH_SUCCESS") != 0) {
+        printf("Authentication failed!\n");
+        close(sock);
+        return 0;
+    }
+
+    printf("Authentication successful!\n");
+
+    int choice;
+    while (1) {
+        printf("\n--- MENU ---\n1. Get Server Date & Time\n2. Get Server System Info\n3. Upload File\n4. Terminate Session\nChoice: ");
+        scanf("%d", &choice);
+
+        if (choice == 1) {
+            send(sock, "1", 1, 0);
+            memset(buffer, 0, BUFFER_SIZE);
+            read(sock, buffer, BUFFER_SIZE);
+            printf("Server Response: %s\n", buffer);
+        } else if (choice == 2) {
+            send(sock, "2", 1, 0);
+            memset(buffer, 0, BUFFER_SIZE);
+            read(sock, buffer, BUFFER_SIZE);
+            printf("Server Response: %s\n", buffer);
+        } else if (choice == 3) {
+            char file_content[1000];
+            printf("Enter text to upload as file: ");
+            getchar(); // clear newline
+            fgets(file_content, sizeof(file_content), stdin);
+            
+            sprintf(buffer, "UPLOAD %s", file_content);
+            send(sock, buffer, strlen(buffer), 0);
+            
+            memset(buffer, 0, BUFFER_SIZE);
+            read(sock, buffer, BUFFER_SIZE);
+            printf("Server Response: %s\n", buffer);
+        } else if (choice == 4) {
+            send(sock, "4", 1, 0);
+            printf("Session terminated.\n");
+            break;
+        }
+    }
+
+    close(sock);
+    return 0;
+}

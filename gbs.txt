@@ -1,0 +1,215 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <math.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
+
+#define PORT 8090
+
+typedef struct FrameNode {
+    int seq_num;
+    char data[50];
+    struct FrameNode* next;
+} FrameNode;
+
+typedef struct Packet {
+    int seq_num;
+    char data[50];
+    int ack_num;
+    int drop_sim;
+} Packet;
+
+// Helper function to force full socket reads
+int recv_exact(int sock, void* buffer, size_t size) {
+    size_t total_read = 0;
+    char* ptr = (char*)buffer;
+    while (total_read < size) {
+        int bytes = recv(sock, ptr + total_read, size - total_read, 0);
+        if (bytes <= 0) return bytes;
+        total_read += bytes;
+    }
+    return total_read;
+}
+
+// 1. Fixed linked list storage utility
+void storeInLinkedListBuffer(FrameNode** head, int seq, const char* data) {
+    FrameNode* newNode = (FrameNode*)malloc(sizeof(FrameNode));
+    newNode->seq_num = seq;
+    strncpy(newNode->data, data, sizeof(newNode->data) - 1);
+    newNode->data[sizeof(newNode->data) - 1] = '\0';
+    newNode->next = NULL;
+
+    if (*head == NULL) {
+        *head = newNode;
+    } else {
+        FrameNode* temp = *head;
+        while (temp->next != NULL) {
+            temp = temp->next;
+        }
+        temp->next = newNode;
+    }
+}
+
+// 2. Fixed node fetching utility for Go-Back-N retransmission
+FrameNode* fetchFromLinkedListBuffer(FrameNode* head, int seq) {
+    FrameNode* temp = head;
+    while (temp != NULL) {
+        if (temp->seq_num == seq) {
+            return temp;
+        }
+        temp = temp->next;
+    }
+    return NULL;
+}
+
+// 3. Fixed node removal utility to clear acknowledged frames
+void removeFromLinkedListBuffer(FrameNode** head, int ack_num) {
+    while (*head != NULL && (*head)->seq_num < ack_num) {
+        FrameNode* temp = *head;
+        *head = (*head)->next;
+        free(temp);
+    }
+}
+
+int main() {
+    int sock = 0;
+    struct sockaddr_in serv_addr;
+    int m, total_frames, drop_index;
+
+    // Create Socket
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        printf("\n Socket creation error \n");
+        return -1;
+    }
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+
+    // Convert address to binary (localhost)
+    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
+        printf("\nInvalid address/ Address not supported \n");
+        return -1;
+    }
+
+    printf("=========================================\n");
+    printf("            SENDER (GO-BACK-N)           \n");
+    printf("=========================================\n");
+    printf("Status: Connecting to Receiver on port %d...\n", PORT);
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        printf("\nConnection Failed! Ensure your receiver (server) is running first.\n");
+        return -1;
+    }
+    printf("Status: Connection established.\n\n");
+
+    printf("Enter number of bits for sequence numbers (m): ");
+    if (scanf("%d", &m) != 1) return 0;
+
+    int window_size = (int)pow(2, m) - 1;
+    if (window_size <= 0) window_size = 1;
+    printf("Calculated Sliding Window Size (2^m - 1): %d\n\n", window_size);
+
+    printf("Enter total number of frames to send: ");
+    if (scanf("%d", &total_frames) != 1) return 0;
+
+    char user_data[total_frames][50];
+    int i;
+    for (i = 0; i < total_frames; i++) {
+        printf("Enter message content for Frame %d: ", i);
+        scanf("%49s", user_data[i]);
+    }
+
+    printf("\nEnter frame index to simulate as lost/dropped (-1 for no drop): ");
+    if (scanf("%d", &drop_index) != 1) return 0;
+
+    FrameNode* bufferList = NULL;
+    int first_unack = 0; // S_f
+    int next_send = 0;   // S_n
+
+    // 2-Second Timeout on Socket Operations
+    struct timeval timeout;
+    timeout.tv_sec = 2;
+    timeout.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    printf("\n================ TRANSMISSION STARTED ================\n");
+
+    while (first_unack < total_frames) {
+        // Transmit frames while sliding window has open slots
+        while ((next_send - first_unack < window_size) && (next_send < total_frames)) {
+            printf("\n[SENDER] Preparing Frame %d: \"%s\"\n", next_send, user_data[next_send]);
+
+            storeInLinkedListBuffer(&bufferList, next_send, user_data[next_send]);
+            printf("[SENDER] Buffered Frame %d in Linked List memory.\n", next_send);
+
+            Packet pkt;
+            memset(&pkt, 0, sizeof(Packet));
+            pkt.seq_num = next_send;
+            strncpy(pkt.data, user_data[next_send], sizeof(pkt.data) - 1);
+            pkt.drop_sim = (next_send == drop_index) ? 1 : 0;
+
+            if (next_send == drop_index) {
+                drop_index = -1; // Apply loss simulation only once
+            }
+
+            printf("[SENDER] Sent Frame %d to TCP channel.\n", next_send);
+            send(sock, &pkt, sizeof(Packet), 0);
+
+            if (first_unack == next_send) {
+                printf("[SENDER] Timer started for oldest unacknowledged Frame %d.\n", first_unack);
+            }
+
+            next_send++;
+        }
+
+        // Wait for ACK response from Receiver
+        Packet ack_pkt;
+        int bytes = recv_exact(sock, &ack_pkt, sizeof(Packet));
+
+        if (bytes <= 0) {
+            // Timer expired event
+            printf("\n-----------------------------------------\n");
+            printf("[SENDER TIMEOUT] No response received for Frame %d within timeout!\n", first_unack);
+            printf("[SENDER ACTION] Go-Back-N Retransmission: Resending frames from %d through %d...\n", first_unack, next_send - 1);
+
+            int temp = first_unack;
+            while (temp < next_send) {
+                FrameNode* node = fetchFromLinkedListBuffer(bufferList, temp);
+                if (node != NULL) {
+                    Packet resend_pkt;
+                    memset(&resend_pkt, 0, sizeof(Packet));
+                    resend_pkt.seq_num = node->seq_num;
+                    strncpy(resend_pkt.data, node->data, sizeof(resend_pkt.data) - 1);
+                    resend_pkt.drop_sim = 0;
+
+                    printf(" -> Retransmitting Frame %d: \"%s\"\n", temp, resend_pkt.data);
+                    send(sock, &resend_pkt, sizeof(Packet), 0);
+                }
+                temp++;
+            }
+            printf("-----------------------------------------\n");
+        } else {
+            // ACK received event
+            printf("\n[SENDER] Received ACK %d from Receiver.\n", ack_pkt.ack_num);
+            if (ack_pkt.ack_num > first_unack && ack_pkt.ack_num <= next_send) {
+                printf("[SENDER] ACK %d is valid. Sliding window forward...\n", ack_pkt.ack_num);
+                removeFromLinkedListBuffer(&bufferList, ack_pkt.ack_num);
+                first_unack = ack_pkt.ack_num;
+                printf("[SENDER] Window updated: Next expected ACK is %d.\n", first_unack + 1);
+            } else {
+                printf("[SENDER] Duplicate or Stale ACK %d received (Ignored).\n", ack_pkt.ack_num);
+            }
+        }
+    }
+
+    printf("\n=========================================\n");
+    printf("Status: All %d frames delivered and acknowledged successfully!\n", total_frames);
+    printf("=========================================\n");
+
+    // Clean up allocated linked list nodes before exiting
+    removeFromLinkedListBuffer(&bufferList, total_frames + 1);
+    close(sock);
+    return 0;
+}

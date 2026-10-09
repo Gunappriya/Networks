@@ -1,0 +1,106 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 8090
+
+typedef struct Packet {
+    int seq_num;
+    char data[50];
+    int ack_num;
+    int drop_sim;
+} Packet;
+
+int recv_exact(int sock, void* buffer, size_t size) {
+    size_t total_read = 0;
+    char* ptr = (char*)buffer;
+    while (total_read < size) {
+        int bytes = recv(sock, ptr + total_read, size - total_read, 0);
+        if (bytes <= 0) return bytes;
+        total_read += bytes;
+    }
+    return total_read;
+}
+
+int main() {
+    int server_fd, new_socket;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
+    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    listen(server_fd, 3);
+
+    printf("==================================================\n");
+    printf("          RECEIVER (GBN - MULTI-CLIENT)           \n");
+    printf("==================================================\n");
+    printf("Status: Receiver online. Listening on port %d...\n\n", PORT);
+
+    // CRITICAL: Infinite loop to keep the server running for subsequent clients
+    while (1) {
+        printf("[SERVER] Waiting for a client connection...\n");
+        new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
+
+        if (new_socket < 0) {
+            perror("Accept failed");
+            continue;
+        }
+        printf("\n>>> Status: Connection established with a Client! <<<\n\n");
+
+        int expected_seq = 0;
+        Packet pkt;
+
+        // Process all frames from the currently connected client
+        while (recv_exact(new_socket, &pkt, sizeof(Packet)) > 0) {
+            printf("-----------------------------------------\n");
+            printf("[RECEIVER] Arrived: Frame %d | Content: \"%s\"\n", pkt.seq_num, pkt.data);
+
+            // Check for simulated network drop
+            if (pkt.drop_sim == 1) {
+                printf("[SIMULATION] Frame %d was dropped/corrupted in transit!\n", pkt.seq_num);
+                printf("[RECEIVER] Action: Ignoring frame and waiting for retransmission.\n");
+                continue;
+            }
+
+            // Check if packet matches expected sequence number
+            if (pkt.seq_num == expected_seq) {
+                printf("[RECEIVER] Verification Passed: Frame %d is in correct sequence.\n", pkt.seq_num);
+                printf("[RECEIVER] Action: Frame content delivered to upper network layer.\n");
+                expected_seq++;
+
+                Packet ack;
+                memset(&ack, 0, sizeof(Packet));
+                ack.ack_num = expected_seq;
+                printf("[RECEIVER] Action: Transmitting ACK %d back to Sender.\n", expected_seq);
+                send(new_socket, &ack, sizeof(Packet), 0);
+            } else {
+                printf("[RECEIVER] Verification Failed: Expected Frame %d, but got Frame %d.\n", expected_seq, pkt.seq_num);
+                printf("[RECEIVER] Action: Discarding out-of-order frame.\n");
+
+                Packet ack;
+                memset(&ack, 0, sizeof(Packet));
+                ack.ack_num = expected_seq; // Send cumulative ACK for what was expected
+                printf("[RECEIVER] Action: Resending duplicate ACK %d to request missing frame.\n", expected_seq);
+                send(new_socket, &ack, sizeof(Packet), 0);
+            }
+        }
+
+        // Current client finished or dropped connection
+        printf("\n>>> Status: Client finished transmission or disconnected. <<<\n");
+        printf("[SERVER] Closing active client socket. Re-arming for next connection...\n");
+        close(new_socket);
+        printf("==================================================\n\n");
+    }
+
+    close(server_fd);
+    return 0;
+}
